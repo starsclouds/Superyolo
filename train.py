@@ -50,6 +50,7 @@ def train(hyp, opt, device, tb_writer=None):
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
 
     # Directories
+    #这部分设置保存权重和结果的目录
     wdir = save_dir / 'weights'
     wdir.mkdir(parents=True, exist_ok=True)  # make dir
     last = wdir / 'last.pt'
@@ -57,12 +58,14 @@ def train(hyp, opt, device, tb_writer=None):
     results_file = save_dir / 'results.txt'
 
     # Save run settings
+    #将超参数和选项保存到YAML文件中
     with open(save_dir / 'hyp.yaml', 'w') as f:
         yaml.dump(hyp, f, sort_keys=False)
     with open(save_dir / 'opt.yaml', 'w') as f:
         yaml.dump(vars(opt), f, sort_keys=False)
 
     # Configure
+    # 加载数据集配置文件
     plots = not opt.evolve  # create plots
     cuda = device.type != 'cpu'
     init_seeds(2 + rank)
@@ -71,6 +74,7 @@ def train(hyp, opt, device, tb_writer=None):
     is_coco = opt.data.endswith('coco.yaml')
 
     # Logging- Doing this before checking the dataset. Might update data_dict
+    # 日志设置
     loggers = {'wandb': None}  # loggers dict
     if rank in [-1, 0]:
         opt.hyp = hyp  # add hyperparameters
@@ -86,6 +90,7 @@ def train(hyp, opt, device, tb_writer=None):
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
+    #模型初始化
     pretrained = weights.endswith('.pt')
     down_factor = int(opt.train_img_size/opt.test_img_size)
     if pretrained:
@@ -114,6 +119,7 @@ def train(hyp, opt, device, tb_writer=None):
             v.requires_grad = False
 
     # Optimizer
+    # 优化器设置
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
@@ -150,6 +156,7 @@ def train(hyp, opt, device, tb_writer=None):
     # optimizer = build_optimizer(config, model)
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
+    #学习率调度器
     if opt.linear_lr:
         lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
     else:
@@ -209,6 +216,7 @@ def train(hyp, opt, device, tb_writer=None):
         from utils.datasets import create_dataloader_sr as create_dataloader
     else:
         from utils.datasets_single import create_dataloader
+    #数据加载器设置
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                         hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                         #world_size=opt.world_size,
@@ -577,6 +585,7 @@ def train(hyp, opt, device, tb_writer=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     #############################
+    # 参数解析
     parser.add_argument('--weights', type=str, default='', help='initial weights path')
     parser.add_argument('--cfg', type=str,default='models/SRyolo_MF.yaml', help='model.yaml path') #yolov5s
     parser.add_argument('--super', action='store_true', help='super resolution')
@@ -622,6 +631,7 @@ if __name__ == '__main__':
     #config = get_config(args)
 
     # Set DDP variables
+    # 分布式训练设置
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
     set_logging(opt.global_rank)
@@ -630,6 +640,7 @@ if __name__ == '__main__':
         check_requirements()
     opt.img_size = [opt.train_img_size,opt.test_img_size]
     # Resume
+    # 断点续训处理
     wandb_run = check_wandb_resume(opt)
     if opt.resume and not wandb_run:  # resume an interrupted run
         ckpt = opt.resume if isinstance(opt.resume, str) else get_latest_run()  # specified or most recent path
@@ -648,6 +659,7 @@ if __name__ == '__main__':
         opt.save_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok | opt.evolve)  # increment run
 
     # DDP mode
+    # 设备选择与分布式训练初始化
     opt.total_batch_size = opt.batch_size
     device = select_device(opt.device, batch_size=opt.batch_size)
     if opt.local_rank != -1:
@@ -659,20 +671,25 @@ if __name__ == '__main__':
         opt.batch_size = opt.total_batch_size // opt.world_size
 
     # Hyperparameters
+    #超参数加载
     with open(opt.hyp,encoding='utf-8') as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)  # load hyps
 
     # Train
+    # 训练或超参数优化
     logger.info(opt)
     if not opt.evolve:
         tb_writer = None  # init loggers
+        # 初始化Tensorboard写入器
         if opt.global_rank in [-1, 0]:
             prefix = colorstr('tensorboard: ')
             logger.info(f"{prefix}Start with 'tensorboard --logdir {opt.project}', view at http://localhost:6006/")
             tb_writer = SummaryWriter(opt.save_dir)  # Tensorboard
+        # 调用train函数开始训练
         train(hyp, opt, device, tb_writer)
 
     # Evolve hyperparameters (optional)
+    # 进行超参数优化
     else:
         # Hyperparameter evolution metadata (mutation scale 0-1, lower_limit, upper_limit)
         meta = {'lr0': (1, 1e-5, 1e-1),  # initial learning rate (SGD=1E-2, Adam=1E-3)
@@ -707,6 +724,7 @@ if __name__ == '__main__':
         assert opt.local_rank == -1, 'DDP mode not implemented for --evolve'
         opt.notest, opt.nosave = True, True  # only test/save final epoch
         # ei = [isinstance(x, (int, float)) for x in hyp.values()]  # evolvable indices
+        # 保存最佳超参数
         yaml_file = Path(opt.save_dir) / 'hyp_evolved.yaml'  # save best result here
         if opt.bucket:
             os.system('gsutil cp gs://%s/evolve.txt .' % opt.bucket)  # download evolve.txt if exists
@@ -750,6 +768,7 @@ if __name__ == '__main__':
             print_mutation(hyp.copy(), results, yaml_file, opt.bucket)
 
         # Plot results
+        # 绘制优化结果
         plot_evolution(yaml_file)
         print(f'Hyperparameter evolution complete. Best results saved as: {yaml_file}\n'
               f'Command to train a new model with these hyperparameters: $ python train.py --hyp {yaml_file}')
