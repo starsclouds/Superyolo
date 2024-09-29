@@ -65,7 +65,7 @@ def train(hyp, opt, device, tb_writer=None):
         yaml.dump(vars(opt), f, sort_keys=False)
 
     # Configure
-    # 加载数据集配置文件
+    # 设置随机种子并加载数据集配置文件
     plots = not opt.evolve  # create plots
     cuda = device.type != 'cpu'
     init_seeds(2 + rank)
@@ -111,6 +111,7 @@ def train(hyp, opt, device, tb_writer=None):
     test_path = data_dict['val']
 
     # Freeze
+    #设置模型参数的冻结状态
     freeze = []  # parameter names to freeze (full or partial)
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
@@ -120,6 +121,8 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Optimizer
     # 优化器设置
+    
+    # 计算累计批次大小和权重衰减
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
@@ -143,6 +146,7 @@ def train(hyp, opt, device, tb_writer=None):
     from optimizer import set_weight_decay
     pg0 = set_weight_decay(model, skip, skip_keywords)
 
+    根据选项设置Adam或SGD优化器
     if opt.adam:
         optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
@@ -156,7 +160,7 @@ def train(hyp, opt, device, tb_writer=None):
     # optimizer = build_optimizer(config, model)
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
-    #学习率调度器
+    #学习率调度器（线性或余弦退火）
     if opt.linear_lr:
         lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
     else:
@@ -164,10 +168,10 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
-    # EMA
+    # EMA（指数移动平均）
     ema = ModelEMA(model) if rank in [-1, 0] else None
 
-    # Resume
+    # Resume（断点续训处理） 如果是从断点续训，加载优化器状态，EMA状态
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
         # Optimizer
@@ -217,6 +221,7 @@ def train(hyp, opt, device, tb_writer=None):
     else:
         from utils.datasets_single import create_dataloader
     #数据加载器设置
+    #创建训练数据加载器
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                         hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                         #world_size=opt.world_size,
@@ -232,6 +237,7 @@ def train(hyp, opt, device, tb_writer=None):
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
+    #创建测试数据加载器
     if rank in [-1, 0]:
         # if not opt.data.endswith('SRvedai.yaml'):
         testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt,  # testloader
@@ -265,6 +271,7 @@ def train(hyp, opt, device, tb_writer=None):
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank)
 
     # Model parameters
+    # 设置模型参数
     hyp['box'] *= 3. / nl  # scale to layers
     hyp['cls'] *= nc / 80. * 3. / nl  # scale to classes and layers
     hyp['obj'] *= (imgsz / 640) ** 2 * 3. / nl  # scale to image size and layers
@@ -275,6 +282,7 @@ def train(hyp, opt, device, tb_writer=None):
     model.names = names
 
     # Start training
+    # 主训练循环
     t0 = time.time()
     nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
@@ -323,6 +331,7 @@ def train(hyp, opt, device, tb_writer=None):
         model.train()
 
         # Update image weights (optional)
+        # 更新图像权重
         if opt.image_weights:
             # Generate indices
             if rank in [-1, 0]:
@@ -348,6 +357,8 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
+        
+        # 遍历每个批次数据
         for i, (imgs, irs, targets, paths, _) in pbar:  # batch zjq  -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             image = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -388,6 +399,7 @@ def train(hyp, opt, device, tb_writer=None):
                     irs = F.interpolate(irs, size=ns, mode='bilinear', align_corners=False) #zjq
 
             # Forward
+            # 前向传播，计算损失
             with amp.autocast(enabled=cuda):
                 # t0 = time.time()
                 if opt.super:# and not opt.attention and not opt.super_attention:
@@ -428,9 +440,11 @@ def train(hyp, opt, device, tb_writer=None):
                     loss *= 4.
             # break #zjq
             # Backward
+            # 反向传播，更新模型参数
             scaler.scale(loss).backward()
 
             # Optimize
+            # 更新EMA
             if ni % accumulate == 0:
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
@@ -439,6 +453,7 @@ def train(hyp, opt, device, tb_writer=None):
                     ema.update(model)
 
             # Print
+            # 记录和打印训练进度
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
@@ -461,11 +476,14 @@ def train(hyp, opt, device, tb_writer=None):
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
 
+        #在每个epoch结束后进行下列操作：
         # Scheduler
+        # 更新学习率
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()
 
         # DDP process 0 or single-GPU
+        # 进行验证
         if rank in [-1, 0]:
             # mAP
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
@@ -487,6 +505,7 @@ def train(hyp, opt, device, tb_writer=None):
                                                  is_coco=is_coco)
 
             # Write
+            # 保存模型检查点
             with open(results_file, 'a') as f:
                 f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
             if len(opt.name) and opt.bucket:
@@ -510,6 +529,7 @@ def train(hyp, opt, device, tb_writer=None):
             wandb_logger.end_epoch(best_result=best_fitness == fi)
 
             # Save model
+            # 更新最佳模型（如果需要的话）
             if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
@@ -539,8 +559,11 @@ def train(hyp, opt, device, tb_writer=None):
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
+    
+    #训练结束后的操作
     if rank in [-1, 0]:
         # Plots
+        # 绘制训练结果图表
         if plots:
             plot_results(save_dir=save_dir)  # save as results.png
             if wandb_logger.wandb:
@@ -548,6 +571,7 @@ def train(hyp, opt, device, tb_writer=None):
                 wandb_logger.log({"Results": [wandb_logger.wandb.Image(str(save_dir / f), caption=f) for f in files
                                               if (save_dir / f).exists()]})
         # Test best.pt
+        # 对最终模型进行测试（如果是COCO数据集）
         logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
         if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
             for m in (last, best) if best.exists() else (last):  # speed, mAP tests
@@ -565,6 +589,7 @@ def train(hyp, opt, device, tb_writer=None):
                                           is_coco=is_coco)
 
         # Strip optimizers
+        # 移除优化器状态等以减小模型大小
         final = best if best.exists() else last  # final model
         for f in last, best:
             if f.exists():
@@ -578,6 +603,7 @@ def train(hyp, opt, device, tb_writer=None):
         wandb_logger.finish_run()
     else:
         dist.destroy_process_group()
+    # 清理GPU缓存
     torch.cuda.empty_cache()
     return results
 
